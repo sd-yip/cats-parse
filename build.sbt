@@ -14,7 +14,7 @@ ThisBuild / organizationName := "Typelevel"
 ThisBuild / publishGithubUser := "johnynek"
 ThisBuild / publishFullName := "P. Oscar Boykin"
 
-ThisBuild / crossScalaVersions := List("3.0.2", "2.11.12", "2.12.15", "2.13.6")
+ThisBuild / crossScalaVersions := List("3.0.2", "2.12.15", "2.13.6")
 
 ThisBuild / spiewakCiReleaseSnapshots := true
 
@@ -117,26 +117,17 @@ lazy val core = crossProject(JSPlatform, JVMPlatform)
   .crossType(CrossType.Full)
   .settings(
     name := "cats-parse",
-    libraryDependencies ++= {
-      val isScala211 = CrossVersion.partialVersion(scalaVersion.value).contains((2, 11))
+    libraryDependencies ++=
       Seq(
-        if (isScala211) cats211.value else cats.value,
+        cats.value,
         munit.value % Test,
         munitScalacheck.value % Test
-      )
-    },
-    scalacOptions ++= {
-      val isScala211 = CrossVersion.partialVersion(scalaVersion.value).contains((2, 11))
-      // this code seems to trigger a bug in 2.11 pattern analysis
-      if (isScala211) List("-Xno-patmat-analysis") else Nil
-    },
-    mimaPreviousArtifacts := {
-      val isScala211 = CrossVersion.partialVersion(scalaVersion.value).contains((2, 11))
-      if (isScala211) Set.empty else mimaPreviousArtifacts.value
-    }
+      ),
+    mimaPreviousArtifacts :=
+      mimaPreviousArtifacts.value
   )
   .jsSettings(
-    crossScalaVersions := (ThisBuild / crossScalaVersions).value.filterNot(_.startsWith("2.11")),
+    crossScalaVersions := (ThisBuild / crossScalaVersions).value,
     Global / scalaJSStage := FastOptStage,
     parallelExecution := false,
     jsEnv := new org.scalajs.jsenv.nodejs.NodeJSEnv(),
