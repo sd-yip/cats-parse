@@ -32,7 +32,7 @@ private[parse] class RadixNode(
     val children: Array[RadixNode],
     val word: Boolean
 ) {
-  override def toString(): String =
+  override def toString: String =
     s"RadixNode(${fsts.mkString("[", ", ", "]")}, ${children.mkString("[", ", ", "]")}, $word)"
 }
 
@@ -53,14 +53,14 @@ private[parse] object RadixNode {
             keys,
             key,
             NonEmptyList.one(key),
-            (prefix(0), prefix.tail, current.map(_.drop(prefix.size)).reverse) :: acc
+            (prefix(0), prefix.tail, current.map(_.drop(prefix.length)).reverse) :: acc
           )
         } else {
           // clip the prefix to the length, and continue
           groupByNonEmptyPrefix(keys, prefix.take(prefixSize), key :: current, acc)
         }
       case Nil =>
-        (prefix(0), prefix.tail, current.map(_.drop(prefix.size)).reverse) :: acc
+        (prefix(0), prefix.tail, current.map(_.drop(prefix.length)).reverse) :: acc
     }
 
   def fromSortedStrings(strings: NonEmptyList[String]): RadixNode =

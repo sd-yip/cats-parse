@@ -21,22 +21,22 @@
 
 package cats.parse
 
-import java.util.BitSet
+import java.util
 
 object BitSetUtil {
-  type Tpe = BitSet
+  type Tpe = util.BitSet
 
   @inline final val isScalaJs = false
   @inline final val isScalaJvm = true
 
-  @inline final def isSet(b: BitSet, idx: Int): Boolean =
+  @inline final def isSet(b: util.BitSet, idx: Int): Boolean =
     // BitSet can't deal with negatives, so mask those out
     b.get(idx & Int.MaxValue)
 
   // we require a sorted, nonEmpty, charArray
-  def bitSetFor(charArray: Array[Char]): BitSet = {
+  def bitSetFor(charArray: Array[Char]): util.BitSet = {
     val min = charArray(0).toInt
-    val bs = new BitSet(charArray(charArray.length - 1).toInt + 1 - min)
+    val bs = new util.BitSet(charArray(charArray.length - 1).toInt + 1 - min)
     var idx = 0
     while (idx < charArray.length) {
       bs.set(charArray(idx).toInt - min)
@@ -49,8 +49,8 @@ object BitSetUtil {
   def isSingleton(t: Tpe): Boolean = t.cardinality() == 1
 
   // what are all the Chars in these bitsets
-  def union(bs: List[(Int, BitSet)]): Iterable[Char] = {
-    def toIter(m: Int, bs: BitSet): Iterator[Char] =
+  def union(bs: List[(Int, util.BitSet)]): Iterable[Char] = {
+    def toIter(m: Int, bs: util.BitSet): Iterator[Char] =
       Iterator
         .iterate(0) { m => bs.nextSetBit(m + 1) }
         .takeWhile(_ >= 0)

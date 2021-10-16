@@ -22,7 +22,8 @@
 package cats.parse
 
 import cats.data.{NonEmptyList, NonEmptyVector}
-import scala.collection.mutable.Builder
+
+import scala.collection.mutable
 
 /** A limited Builder-like value we use for portability
   */
@@ -31,12 +32,13 @@ trait Appender[-A, +B] {
   def finish(): B
 }
 
+//noinspection JavaAccessorEmptyParenCall
 object Appender {
   def charStringAppender(): Appender[Char, String] =
     new Appender[Char, String] {
       val bldr = new java.lang.StringBuilder()
 
-      def append(item: Char) = {
+      def append(item: Char): this.type = {
         bldr.append(item)
         this
       }
@@ -48,7 +50,7 @@ object Appender {
     new Appender[String, String] {
       val bldr = new java.lang.StringBuilder()
 
-      def append(item: String) = {
+      def append(item: String): this.type = {
         bldr.append(item)
         this
       }
@@ -56,9 +58,9 @@ object Appender {
       def finish(): String = bldr.toString()
     }
 
-  def fromBuilder[A, B](bldr: Builder[A, B]): Appender[A, B] =
+  def fromBuilder[A, B](bldr: mutable.Builder[A, B]): Appender[A, B] =
     new Appender[A, B] {
-      def append(item: A) = {
+      def append(item: A): this.type = {
         bldr += item
         this
       }
@@ -68,14 +70,14 @@ object Appender {
 
   val unitAppender: Appender[Any, Unit] =
     new Appender[Any, Unit] {
-      def append(item: Any) = this
+      def append(item: Any): this.type = this
       def finish(): Unit = ()
     }
 
   def intCounter(): Appender[Any, Int] =
     new Appender[Any, Int] {
       private[this] var n = 0
-      def append(item: Any) = {
+      def append(item: Any): this.type = {
         n += 1
         this
       }
@@ -99,68 +101,51 @@ trait Accumulator0[-A, +B] extends Accumulator[A, B] {
 }
 
 object Accumulator0 {
-  implicit val intCounter0: Accumulator0[Any, Int] = new Accumulator0[Any, Int] {
-    override def newAppender(): Appender[Any, Int] = Appender.intCounter()
-  }
+  implicit val intCounter0: Accumulator0[Any, Int] = () => Appender.intCounter()
 
   implicit val charStringAccumulator0: Accumulator0[Char, String] =
-    new Accumulator0[Char, String] {
-      def newAppender() = Appender.charStringAppender()
-    }
+    () => Appender.charStringAppender()
 
   implicit val stringAccumulator0: Accumulator0[String, String] =
-    new Accumulator0[String, String] {
-      def newAppender() = Appender.stringAppender()
-    }
+    () => Appender.stringAppender()
 
   implicit def listAccumulator0[A]: Accumulator0[A, List[A]] =
-    new Accumulator0[A, List[A]] {
-      def newAppender() = Appender.fromBuilder(List.newBuilder[A])
-    }
+    () => Appender.fromBuilder(List.newBuilder[A])
 
   implicit def vectorAccumulator0[A]: Accumulator0[A, Vector[A]] =
-    new Accumulator0[A, Vector[A]] {
-      def newAppender() = Appender.fromBuilder(Vector.newBuilder[A])
-    }
+    () => Appender.fromBuilder(Vector.newBuilder[A])
 
   /** An accumulator that does nothing and returns Unit Note, this should not generally be used with
     * repAs0 because internal allocations still happen. Instead use .rep0.void
     */
   val unitAccumulator0: Accumulator0[Any, Unit] =
-    new Accumulator0[Any, Unit] {
-      def newAppender() = Appender.unitAppender
-    }
+    () => Appender.unitAppender
 }
 
 object Accumulator extends Priority0Accumulator {
   implicit def nonEmptyListAccumulator0[A]: Accumulator[A, NonEmptyList[A]] =
-    new Accumulator[A, NonEmptyList[A]] {
-      def newAppender(first: A) =
-        new Appender[A, NonEmptyList[A]] {
-          val bldr = List.newBuilder[A]
-          def append(item: A) = {
-            bldr += item
-            this
-          }
+    (first: A) => new Appender[A, NonEmptyList[A]] {
+      private val bldr = List.newBuilder[A]
 
-          def finish() = NonEmptyList(first, bldr.result())
-        }
+      def append(item: A): this.type = {
+        bldr += item
+        this
+      }
+
+      def finish(): NonEmptyList[A] = NonEmptyList(first, bldr.result())
     }
 
   implicit def nonEmptyVectorAccumulator0[A]: Accumulator[A, NonEmptyVector[A]] =
-    new Accumulator[A, NonEmptyVector[A]] {
-      def newAppender(first: A) =
-        new Appender[A, NonEmptyVector[A]] {
-          val bldr = Vector.newBuilder[A]
-          bldr += first
+    (first: A) => new Appender[A, NonEmptyVector[A]] {
+      private val bldr = Vector.newBuilder[A]
+      bldr += first
 
-          def append(item: A) = {
-            bldr += item
-            this
-          }
+      def append(item: A): this.type = {
+        bldr += item
+        this
+      }
 
-          def finish() = NonEmptyVector.fromVectorUnsafe(bldr.result())
-        }
+      def finish(): NonEmptyVector[A] = NonEmptyVector.fromVectorUnsafe(bldr.result())
     }
 }
 

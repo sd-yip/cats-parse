@@ -23,11 +23,11 @@ package cats.parse
 
 import cats.{Eval, FunctorFilter, Monad, Defer, Alternative, FlatMap, Now, MonoidK, Order}
 import cats.data.{AndThen, Chain, NonEmptyList}
-
 import cats.implicits._
+
+import java.util.Arrays.{binarySearch, sort}
 import scala.collection.immutable.SortedSet
 import scala.collection.mutable.ListBuffer
-import java.util.Arrays
 
 /** Parser0[A] attempts to extract an `A` value from the given input, potentially moving its offset
   * forward in the process.
@@ -672,6 +672,7 @@ object Parser {
       def offset: Int = expect.offset
     }
 
+    //noinspection ConvertExpressionToSAM
     implicit val catsOrderExpectation: Order[Expectation] =
       new Order[Expectation] {
         override def compare(left: Expectation, right: Expectation): Int = {
@@ -935,14 +936,14 @@ object Parser {
   /** Parse a potentially empty string or fail. This backtracks on failure
     */
   def string0(str: String): Parser0[Unit] =
-    if (str.length == 0) unit
+    if (str.isEmpty) unit
     else string(str)
 
   /** Parse a potentially empty string, in a case-insensitive manner, or fail. This backtracks on
     * failure
     */
   def ignoreCase0(str: String): Parser0[Unit] =
-    if (str.length == 0) unit
+    if (str.isEmpty) unit
     else ignoreCase(str)
 
   /** go through the list of parsers trying each as long as they are epsilon failures (don't
@@ -1427,7 +1428,7 @@ object Parser {
     if (cs.isEmpty) fail
     else {
       val ary = cs.toArray
-      java.util.Arrays.sort(ary)
+      sort(ary)
       rangesFor(ary) match {
         case NonEmptyList((low, high), Nil) if low == Char.MinValue && high == Char.MaxValue =>
           anyChar
@@ -1692,12 +1693,12 @@ object Parser {
   implicit val catsInstancesParser
       : FlatMap[Parser] with Defer[Parser] with MonoidK[Parser] with FunctorFilter[Parser] =
     new FlatMap[Parser] with Defer[Parser] with MonoidK[Parser] with FunctorFilter[Parser] {
-      override def empty[A] = Fail
+      override def empty[A]: Parser[Nothing] = Fail
 
       override def defer[A](pa: => Parser[A]): Parser[A] =
         Parser.this.defer(pa)
 
-      override def functor = this
+      override def functor: this.type = this
 
       override def map[A, B](fa: Parser[A])(fn: A => B): Parser[B] =
         Parser.this.map(fa)(fn)
@@ -1773,7 +1774,7 @@ object Parser {
    */
   protected[parse] final class State(val str: String) {
     var offset: Int = 0
-    var error: Chain[Expectation] = null
+    var error: Chain[Expectation] = _
     var capture: Boolean = true
   }
 
@@ -1795,22 +1796,22 @@ object Parser {
 
   private object Impl {
 
-    val allChars = Char.MinValue to Char.MaxValue
+    val allChars: Seq[Char] = Char.MinValue to Char.MaxValue
 
     case class ConstFn[A](result: A) extends Function[Any, A] {
-      def apply(any: Any) = result
+      def apply(any: Any): A = result
 
       override def andThen[B](that: Function[A, B]): ConstFn[B] =
         ConstFn(that(result))
     }
 
     // this is used to make def unmap0 a pure function wrt `def equals`
-    case class UnmapDefer0(fn: () => Parser0[Any]) extends Function0[Parser0[Any]] {
+    case class UnmapDefer0(fn: () => Parser0[Any]) extends (() => Parser0[Any]) {
       def apply(): Parser0[Any] = unmap0(compute0(fn))
     }
 
     // this is used to make def unmap a pure function wrt `def equals`
-    case class UnmapDefer(fn: () => Parser[Any]) extends Function0[Parser[Any]] {
+    case class UnmapDefer(fn: () => Parser[Any]) extends (() => Parser[Any]) {
       def apply(): Parser[Any] = unmap(compute(fn))
     }
 
@@ -2152,14 +2153,14 @@ object Parser {
 
     case class Fail[A]() extends Parser[A] {
       override def parseMut(state: State): A = {
-        state.error = Chain.one(Expectation.Fail(state.offset));
+        state.error = Chain.one(Expectation.Fail(state.offset))
         null.asInstanceOf[A]
       }
     }
 
     case class FailWith[A](message: String) extends Parser[A] {
       override def parseMut(state: State): A = {
-        state.error = Chain.one(Expectation.FailWith(state.offset, message));
+        state.error = Chain.one(Expectation.FailWith(state.offset, message))
         null.asInstanceOf[A]
       }
     }
@@ -2203,7 +2204,7 @@ object Parser {
 
       while (cont) {
         val c = str.charAt(offset)
-        val idx = Arrays.binarySearch(tree.fsts, c)
+        val idx = binarySearch(tree.fsts, c)
         if (idx >= 0) {
           val prefix = tree.prefixes(idx)
           // accept the prefix fo this character
@@ -2421,7 +2422,7 @@ object Parser {
       }
 
     case class Defer[A](fn: () => Parser[A]) extends Parser[A] {
-      private[this] var computed: Parser0[A] = null
+      private[this] var computed: Parser0[A] = _
       override def parseMut(state: State): A = {
 
         val p0 = computed
@@ -2438,7 +2439,7 @@ object Parser {
     }
 
     case class Defer0[A](fn: () => Parser0[A]) extends Parser0[A] {
-      private[this] var computed: Parser0[A] = null
+      private[this] var computed: Parser0[A] = _
       override def parseMut(state: State): A = {
 
         val p0 = computed
@@ -2508,7 +2509,7 @@ object Parser {
           }
           // else we did a partial read then failed
           // but didn't read at least min items
-          return ()
+          return
         }
       }
     }
@@ -2620,7 +2621,7 @@ object Parser {
               loop(tail, front + s, result)
             }
           case StringIn(ss) :: tail =>
-            val (rights, lefts) = ss.partition(frontHasPrefixOf(_))
+            val (rights, lefts) = ss.partition(frontHasPrefixOf)
             val front1 = front | lefts
             if (rights.nonEmpty) {
               // there are some that can't be merged in
@@ -2757,11 +2758,11 @@ object Parser0 {
     new Monad[Parser0] with Alternative[Parser0] with Defer[Parser0] with FunctorFilter[Parser0] {
       override def pure[A](a: A): Parser0[A] = Parser.pure(a)
 
-      override def defer[A](a: => Parser0[A]) = Parser.defer0(a)
+      override def defer[A](a: => Parser0[A]): Parser0[A] = Parser.defer0(a)
 
       override def empty[A]: Parser0[A] = Parser.Fail
 
-      override def functor = this
+      override def functor: this.type = this
 
       override def map[A, B](fa: Parser0[A])(fn: A => B): Parser0[B] = Parser.map0(fa)(fn)
 

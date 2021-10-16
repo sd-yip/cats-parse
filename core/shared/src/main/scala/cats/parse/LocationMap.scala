@@ -21,7 +21,7 @@
 
 package cats.parse
 
-import java.util.Arrays
+import java.util.Arrays.binarySearch
 
 /** This is a class to convert linear offset in a string into lines, or the column and line numbers.
   *
@@ -36,8 +36,8 @@ class LocationMap(val input: String) {
   private[this] val firstPos: Array[Int] = {
     val it = lines.iterator.map(_.length)
     val it2 = new Iterator[(Int, Boolean)] {
-      def hasNext = it.hasNext
-      def next() = {
+      def hasNext: Boolean = it.hasNext
+      def next(): (Int, Boolean) = {
         val hn = hasNext
         val i = it.next()
         (i, hn)
@@ -57,7 +57,7 @@ class LocationMap(val input: String) {
   def toLineCol(offset: Int): Option[(Int, Int)] =
     if (offset < 0 || offset >= input.length) None
     else {
-      val idx = Arrays.binarySearch(firstPos, offset)
+      val idx = binarySearch(firstPos, offset)
       if (idx == firstPos.length) {
         // greater than all elements
         None

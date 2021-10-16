@@ -21,20 +21,20 @@
 
 package cats.parse
 
-import scala.collection.mutable.BitSet
+import scala.collection.mutable
 
 object BitSetUtil {
-  type Tpe = BitSet
+  type Tpe = mutable.BitSet
 
   @inline final val isScalaJs = true
   @inline final val isScalaJvm = false
 
-  @inline final def isSet(b: BitSet, idx: Int): Boolean =
+  @inline final def isSet(b: mutable.BitSet, idx: Int): Boolean =
     (idx >= 0) && b(idx)
 
-  def bitSetFor(charArray: Array[Char]): BitSet = {
+  def bitSetFor(charArray: Array[Char]): mutable.BitSet = {
     val min = charArray(0).toInt
-    val bs = new BitSet(charArray(charArray.length - 1).toInt + 1 - min)
+    val bs = new mutable.BitSet(charArray(charArray.length - 1).toInt + 1 - min)
     var idx = 0
     while (idx < charArray.length) {
       bs += charArray(idx).toInt - min
@@ -47,8 +47,8 @@ object BitSetUtil {
   def isSingleton(t: Tpe): Boolean = t.size == 1
 
   // what are all the Chars in these bitsets
-  def union(bs: List[(Int, BitSet)]): Iterable[Char] = {
-    def toIter(m: Int, bs: BitSet): Iterator[Char] =
+  def union(bs: List[(Int, mutable.BitSet)]): Iterable[Char] = {
+    def toIter(m: Int, bs: mutable.BitSet): Iterator[Char] =
       bs.iterator.map { i => (i + m).toChar } ++ Iterator.single(m.toChar)
 
     bs.flatMap { case (m, bs) => toIter(m, bs) }
