@@ -21,12 +21,15 @@
 
 package cats.parse
 
-import cats.{Eval, FunctorFilter, Monad, Defer, Alternative, FlatMap, Now, MonoidK, Order}
-import cats.data.{AndThen, Chain, NonEmptyList}
+import cats.data.{AndThen, Chain, NonEmptyChain, NonEmptyList}
 import cats.implicits._
+import cats.parse.Chunks.{equalElements, equalElementsIgnoreCase, unconsIndexedN, unconsN}
+import cats.{Alternative, Applicative, Defer, Eval, FlatMap, FunctorFilter, Monad, MonoidK, Now, Order}
+import fs2.Compiler.Target
+import fs2.{Chunk, Pull, Stream}
 
 import java.util.Arrays.{binarySearch, sort}
-import scala.collection.immutable.SortedSet
+import scala.collection.immutable.{ArraySeq, SortedSet}
 import scala.collection.mutable.ListBuffer
 
 /** Parser0[A] attempts to extract an `A` value from the given input, potentially moving its offset
@@ -53,7 +56,7 @@ import scala.collection.mutable.ListBuffer
   * Rewinding tends to make error reporting more difficult and can lead to exponential parser
   * behavior it is not the default behavior.
   */
-sealed abstract class Parser0[+A] { self: Product =>
+sealed abstract class Parser0[+A] extends StreamParser0[A] { self: Product =>
 
   /** Attempt to parse an `A` value out of `str`.
     *
@@ -977,7 +980,7 @@ object Parser {
     val res = Impl.mergeStrIn[Any, Parser[Any]](cs) match {
       case Nil => fail
       case p :: Nil => p
-      case two => Impl.OneOf(two)
+      case two: ::[Parser[Any]] => Impl.OneOf(two)
     }
 
     (if (isStr) string(res) else res).asInstanceOf[Parser[A]]
@@ -1020,7 +1023,7 @@ object Parser {
     val res = Impl.mergeStrIn[Any, Parser0[Any]](cs) match {
       case Nil => fail
       case p :: Nil => p
-      case two => Impl.OneOf0(two)
+      case two: ::[Parser0[Any]] => Impl.OneOf0(two)
     }
 
     (if (isStr) string0(res) else res).asInstanceOf[Parser0[A]]
@@ -2021,6 +2024,11 @@ object Parser {
 
     case class Pure[A](result: A) extends Parser0[A] {
       override def parseMut(state: State): A = result
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[A, B]
+      ) =
+        Applicative[F].pure((state, Right(mapper.outputAssembled("", result))))
     }
 
     case class Length(len: Int) extends Parser[String] {
@@ -2038,6 +2046,26 @@ object Parser {
           null
         }
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[String, B]
+      ) =
+        unconsN(state.chars, len, allowFewer = true)
+          .flatMap {
+            case (prefix, suffix) if prefix.size < len =>
+              Pull.output1((
+                StreamState(state.offset, suffix.cons(prefix)),
+                Left(decorator.wrap(prefix, Expectation.Length(state.offset, len, prefix.size)))
+              ))
+            case (prefix, suffix) =>
+              Pull.output1((
+                StreamState(prefix.size + state.offset, suffix),
+                Right(mapper.assemble(prefix))
+              ))
+          }
+          .stream
+          .compile
+          .lastOrError
     }
 
     def void(pa: Parser0[Any], state: State): Unit = {
@@ -2051,11 +2079,21 @@ object Parser {
     case class Void0[A](parser: Parser0[A]) extends Parser0[Unit] {
       override def parseMut(state: State): Unit =
         Impl.void(parser, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[Unit, B]
+      ) =
+        parser.parseStream(state, decorator, mapper.void)
     }
 
     case class Void[A](parser: Parser[A]) extends Parser[Unit] {
       override def parseMut(state: State): Unit =
         Impl.void(parser, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[Unit, B]
+      ) =
+        parser.parseStream(state, decorator, mapper.void)
     }
 
     def string0(pa: Parser0[Any], state: State): String = {
@@ -2071,11 +2109,21 @@ object Parser {
     case class StringP0[A](parser: Parser0[A]) extends Parser0[String] {
       override def parseMut(state: State): String =
         Impl.string0(parser, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[String, B]
+      ) =
+        parser.parseStream(state, decorator, mapper.sourceString)
     }
 
     case class StringP[A](parser: Parser[A]) extends Parser[String] {
       override def parseMut(state: State): String =
         Impl.string0(parser, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[String, B]
+      ) =
+        parser.parseStream(state, decorator, mapper.sourceString)
     }
 
     case object StartParser extends Parser0[Unit] {
@@ -2085,6 +2133,14 @@ object Parser {
         }
         ()
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[Unit, B]
+      ) =
+        Applicative[F].pure(state.offset match {
+          case 0 => (state, Right(mapper.outputAssembled("", ())))
+          case offset => (state, Left(decorator.empty(Expectation.StartOfString(offset))))
+        })
     }
 
     case object EndParser extends Parser0[Unit] {
@@ -2094,10 +2150,36 @@ object Parser {
         }
         ()
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[Unit, B]
+      ) =
+        state
+          .chars
+          .chunks
+          .compile
+          .to(ArraySeq)
+          .map(chunks => chunks.view.map(_.size).sum match {
+            case 0 =>
+              (
+                StreamState(state.offset, Stream.empty[F]),
+                Right(mapper.outputAssembled("", ()))
+              )
+            case n =>
+              (
+                StreamState(state.offset, Stream.emits(chunks).unchunks),
+                Left(decorator.empty(Expectation.EndOfString(state.offset, n)))
+              )
+          })
     }
 
     case object Index extends Parser0[Int] {
       override def parseMut(state: State): Int = state.offset
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[Int, B]
+      ) =
+        Applicative[F].pure((state, Right(mapper.outputAssembled("", state.offset))))
     }
 
     final def backtrack[A](pa: Parser0[A], state: State): A = {
@@ -2112,11 +2194,21 @@ object Parser {
     case class Backtrack0[A](parser: Parser0[A]) extends Parser0[A] {
       override def parseMut(state: State): A =
         Impl.backtrack(parser, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[A, B]
+      ) =
+        decorator.parseBacktracked(parser)(state, mapper)
     }
 
     case class Backtrack[A](parser: Parser[A]) extends Parser[A] {
       override def parseMut(state: State): A =
         Impl.backtrack(parser, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[A, B]
+      ) =
+        decorator.parseBacktracked(parser)(state, mapper)
     }
 
     case class Str(message: String) extends Parser[Unit] {
@@ -2133,6 +2225,26 @@ object Parser {
           ()
         }
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[Unit, B]
+      ) =
+        unconsIndexedN(state.chars, message.length, allowFewer = true)
+          .flatMap {
+            case (prefix, suffix) if !equalElements(prefix, message) =>
+              Pull.output1((
+                StreamState(state.offset, suffix.cons(prefix)),
+                Left(decorator.wrap(prefix, Expectation.OneOfStr(state.offset, message :: Nil)))
+              ))
+            case (_, suffix) =>
+              Pull.output1((
+                StreamState(message.length + state.offset, suffix),
+                Right(mapper.outputAssembled(message, ()))
+              ))
+          }
+          .stream
+          .compile
+          .lastOrError
     }
 
     case class IgnoreCase(message: String) extends Parser[Unit] {
@@ -2149,6 +2261,26 @@ object Parser {
           ()
         }
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[Unit, B]
+      ) =
+        unconsIndexedN(state.chars, message.length, allowFewer = true)
+          .flatMap {
+            case (prefix, suffix) if !equalElementsIgnoreCase(prefix, message) =>
+              Pull.output1((
+                StreamState(state.offset, suffix.cons(prefix)),
+                Left(decorator.wrap(prefix, Expectation.OneOfStr(state.offset, message :: Nil)))
+              ))
+            case (prefix, suffix) =>
+              Pull.output1((
+                StreamState(message.length + state.offset, suffix),
+                Right(mapper.output(prefix, ()))
+              ))
+          }
+          .stream
+          .compile
+          .lastOrError
     }
 
     case class Fail[A]() extends Parser[A] {
@@ -2156,6 +2288,11 @@ object Parser {
         state.error = Chain.one(Expectation.Fail(state.offset))
         null.asInstanceOf[A]
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[A, B]
+      ) =
+        Applicative[F].pure((state, Left(decorator.empty(Expectation.Fail(state.offset)))))
     }
 
     case class FailWith[A](message: String) extends Parser[A] {
@@ -2163,6 +2300,11 @@ object Parser {
         state.error = Chain.one(Expectation.FailWith(state.offset, message))
         null.asInstanceOf[A]
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[A, B]
+      ) =
+        Applicative[F].pure((state, Left(decorator.empty(Expectation.FailWith(state.offset, message)))))
     }
 
     final def oneOf[A](all: Array[Parser0[A]], state: State): A = {
@@ -2229,18 +2371,99 @@ object Parser {
       }
     }
 
-    case class OneOf[A](all: List[Parser[A]]) extends Parser[A] {
+    final def oneOf[F[_] : Target, G[_], A, C](decorator: ExpectationDecorator[G], mapper: ResultMapper[A, C])(
+      state: StreamState[F], expectations: Chain[Expectation], candidates: ::[Parser0[A]]
+    ): F[(StreamState[F], Either[G[NonEmptyChain[Expectation]], C])] =
+      candidates match {
+        case head :: Nil =>
+          head.parseStream(state, decorator, mapper).map(
+            _.map(_.leftMap(decorator.comonad.map(_)(_ prependChain expectations)))
+          )
+
+        case head :: (tail: ::[Parser0[A]]) =>
+          head.parseStream(state, decorator, mapper).flatMap {
+            case _ @ (s @ StreamState(i, _), Left(e)) if i == state.offset =>
+              oneOf(decorator, mapper)(s, expectations ++ decorator.comonad.extract(e).toChain, tail)
+
+            case r =>
+              Applicative[F].pure(
+                r.map(_.leftMap(decorator.comonad.map(_)(_ prependChain expectations)))
+              )
+          }
+      }
+
+    final def stringIn[F[_], R](result: R, peeked: Chunk[Char], s: StreamState[F], radix: RadixNode)(
+      implicit appendChunk: (R, => Chunk[Char]) => R
+    ): Pull[F, (R, StreamState[F]), Unit] =
+      s.chars.pull.uncons1.flatMap {
+        case None =>
+          Pull.output1((
+            result,
+            StreamState(s.offset - peeked.size, Stream.chunk(peeked))
+          ))
+
+        case Some((head, tail)) =>
+          binarySearch(radix.fsts, head) match {
+            case i if i < 0 =>
+              Pull.output1((
+                result,
+                StreamState(s.offset - peeked.size, tail.cons(peeked ++ Chunk.singleton(head)))
+              ))
+
+            case index =>
+              val fixedString = radix.prefixes(index)
+
+              unconsIndexedN(tail, fixedString.length, allowFewer = true).flatMap {
+                case (prefix, suffix) if !equalElements(prefix, fixedString) =>
+                  Pull.output1((
+                    result,
+                    StreamState(s.offset - peeked.size, suffix.cons(peeked ++ Chunk.singleton(head) ++ prefix))
+                  ))
+
+                case (prefix, suffix) =>
+                  val nextRadix = radix.children(index)
+
+                  if (nextRadix.word) {
+                    stringIn(
+                      appendChunk(result, peeked ++ Chunk.singleton(head) ++ prefix),
+                      Chunk.empty,
+                      StreamState(s.offset + peeked.size + 1 + prefix.size, suffix),
+                      nextRadix
+                    )
+                  } else {
+                    stringIn(
+                      result,
+                      peeked ++ Chunk.singleton(head) ++ prefix,
+                      StreamState(s.offset + peeked.size + 1 + prefix.size, suffix),
+                      nextRadix
+                    )
+                  }
+              }
+          }
+      }
+
+    case class OneOf[A](all: ::[Parser[A]]) extends Parser[A] {
       require(all.lengthCompare(2) >= 0, s"expected more than two items, found: ${all.size}")
       private[this] val ary: Array[Parser0[A]] = all.toArray
 
       override def parseMut(state: State): A = oneOf(ary, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[A, B]
+      ) =
+        oneOf(decorator, mapper)(state, Chain.empty, all)
     }
 
-    case class OneOf0[A](all: List[Parser0[A]]) extends Parser0[A] {
+    case class OneOf0[A](all: ::[Parser0[A]]) extends Parser0[A] {
       require(all.lengthCompare(2) >= 0, s"expected more than two items, found: ${all.size}")
       private[this] val ary = all.toArray
 
       override def parseMut(state: State): A = oneOf(ary, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[A, B]
+      ) =
+        oneOf(decorator, mapper)(state, Chain.empty, all)
     }
 
     case class StringIn(sorted: SortedSet[String]) extends Parser[Unit] {
@@ -2250,6 +2473,37 @@ object Parser {
         RadixNode.fromSortedStrings(NonEmptyList.fromListUnsafe(sorted.toList))
 
       override def parseMut(state: State): Unit = stringIn(tree, sorted, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[Unit, B]
+      ) =
+        mapper match {
+          case m: ResultMapper.Voidable[Unit, B] =>
+            stringIn((), Chunk.empty, state, tree)((_, _) => ())
+              .stream
+              .compile
+              .lastOrError
+              .map {
+                case (_, s) if s.offset == state.offset =>
+                  (s, Left(decorator.empty(Expectation.OneOfStr(s.offset, sorted.toList))))
+
+                case (_, s) =>
+                  (s, Right(m.outputUnit))
+              }
+
+          case _ =>
+            stringIn(Chunk.empty[Char], Chunk.empty, state, tree)(_ ++ _)
+              .stream
+              .compile
+              .lastOrError
+              .map {
+                case (r, s) if r.isEmpty =>
+                  (s, Left(decorator.empty(Expectation.OneOfStr(s.offset, sorted.toList))))
+
+                case (result, s) =>
+                  (s, Right(mapper.output(result, ())))
+              }
+        }
     }
 
     final def prod[A, B](pa: Parser0[A], pb: Parser0[B], state: State): (A, B) = {
@@ -2265,10 +2519,20 @@ object Parser {
     case class Prod[A, B](first: Parser0[A], second: Parser0[B]) extends Parser[(A, B)] {
       require(first.isInstanceOf[Parser[_]] || second.isInstanceOf[Parser[_]])
       override def parseMut(state: State): (A, B) = prod(first, second, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], C](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[(A, B), C]
+      ) =
+        mapper.parseProduct(first, second)(state, decorator)
     }
 
     case class Prod0[A, B](first: Parser0[A], second: Parser0[B]) extends Parser0[(A, B)] {
       override def parseMut(state: State): (A, B) = prod(first, second, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], C](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[(A, B), C]
+      ) =
+        mapper.parseProduct(first, second)(state, decorator)
     }
 
     final def softProd[A, B](pa: Parser0[A], pb: Parser0[B], state: State): (A, B) = {
@@ -2293,10 +2557,18 @@ object Parser {
     case class SoftProd[A, B](first: Parser0[A], second: Parser0[B]) extends Parser[(A, B)] {
       require(first.isInstanceOf[Parser[_]] || second.isInstanceOf[Parser[_]])
       override def parseMut(state: State): (A, B) = softProd(first, second, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], C](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[(A, B), C]
+      ) = ???
     }
 
     case class SoftProd0[A, B](first: Parser0[A], second: Parser0[B]) extends Parser0[(A, B)] {
       override def parseMut(state: State): (A, B) = softProd(first, second, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], C](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[(A, B), C]
+      ) = ???
     }
 
     final def map[A, B](parser: Parser0[A], fn: A => B, state: State): B = {
@@ -2307,10 +2579,18 @@ object Parser {
 
     case class Map0[A, B](parser: Parser0[A], fn: A => B) extends Parser0[B] {
       override def parseMut(state: State): B = Impl.map(parser, fn, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], C](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[B, C]
+      ) = ???
     }
 
     case class Map[A, B](parser: Parser[A], fn: A => B) extends Parser[B] {
       override def parseMut(state: State): B = Impl.map(parser, fn, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], C](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[B, C]
+      ) = ???
     }
 
     final def select[A, B, C](
@@ -2340,12 +2620,20 @@ object Parser {
         extends Parser0[Either[(A, C), B]] {
       override def parseMut(state: State): Either[(A, C), B] =
         Impl.select(pab, pc, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], D](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[Either[(A, C), B], D]
+      ) = ???
     }
 
     case class Select[A, B, C](pab: Parser[Either[A, B]], pc: Parser0[C])
         extends Parser[Either[(A, C), B]] {
       override def parseMut(state: State): Either[(A, C), B] =
         Impl.select(pab, pc, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], D](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[Either[(A, C), B], D]
+      ) = ???
     }
 
     final def flatMap[A, B](parser: Parser0[A], fn: A => Parser0[B], state: State): B = {
@@ -2363,11 +2651,19 @@ object Parser {
 
     case class FlatMap0[A, B](parser: Parser0[A], fn: A => Parser0[B]) extends Parser0[B] {
       override def parseMut(state: State): B = Impl.flatMap(parser, fn, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], C](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[B, C]
+      ) = ???
     }
 
     // at least one of the parsers needs to be a Parser
     case class FlatMap[A, B](parser: Parser0[A], fn: A => Parser0[B]) extends Parser[B] {
       override def parseMut(state: State): B = Impl.flatMap(parser, fn, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], C](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[B, C]
+      ) = ???
     }
 
     final def tailRecM[A, B](
@@ -2399,12 +2695,20 @@ object Parser {
       private[this] val p1 = fn(init)
 
       override def parseMut(state: State): B = Impl.tailRecM(p1, fn, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], C](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[B, C]
+      ) = ???
     }
 
     case class TailRecM[A, B](init: A, fn: A => Parser[Either[A, B]]) extends Parser[B] {
       private[this] val p1 = fn(init)
 
       override def parseMut(state: State): B = Impl.tailRecM(p1, fn, state)
+
+      override private[parse] def parseStream[F[_] : Target, G[_], C](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[B, C]
+      ) = ???
     }
 
     @annotation.tailrec
@@ -2436,6 +2740,10 @@ object Parser {
 
         p.parseMut(state)
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[A, B]
+      ) = ???
     }
 
     case class Defer0[A](fn: () => Parser0[A]) extends Parser0[A] {
@@ -2453,6 +2761,10 @@ object Parser {
 
         p.parseMut(state)
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[A, B]
+      ) = ???
     }
 
     /** capture parser p repeatedly, at least min times, at most max times
@@ -2528,6 +2840,10 @@ object Parser {
           ignore
         }
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], C](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[B, C]
+      ) = ???
     }
 
     /** A parser that can repeats the underlying parser multiple times
@@ -2555,6 +2871,10 @@ object Parser {
           ignore
         }
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], C](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[B, C]
+      ) = ???
     }
 
     /*
@@ -2650,6 +2970,10 @@ object Parser {
           '\u0000'
         }
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[Char, B]
+      ) = ???
     }
 
     case class CharIn(min: Int, bitSet: BitSetUtil.Tpe, ranges: NonEmptyList[(Char, Char)])
@@ -2686,6 +3010,10 @@ object Parser {
           '\u0000'
         }
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[Char, B]
+      ) = ???
     }
 
     /*
@@ -2710,6 +3038,10 @@ object Parser {
         state.offset = offset
         ()
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[Unit, B]
+      ) = ???
     }
 
     /*
@@ -2727,6 +3059,10 @@ object Parser {
         // else under failed, so we fail
         ()
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], C](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[Unit, C]
+      ) = ???
     }
 
     case class WithContextP0[A](context: String, under: Parser0[A]) extends Parser0[A] {
@@ -2737,6 +3073,10 @@ object Parser {
         }
         a
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[A, B]
+      ) = ???
     }
 
     case class WithContextP[A](context: String, under: Parser[A]) extends Parser[A] {
@@ -2747,6 +3087,10 @@ object Parser {
         }
         a
       }
+
+      override private[parse] def parseStream[F[_] : Target, G[_], B](
+        state: StreamState[F], decorator: ExpectationDecorator[G], mapper: ResultMapper[A, B]
+      ) = ???
     }
   }
 }

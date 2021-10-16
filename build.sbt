@@ -120,6 +120,7 @@ lazy val core = crossProject(JSPlatform, JVMPlatform)
     libraryDependencies ++=
       Seq(
         cats.value,
+        fs2.value,
         munit.value % Test,
         munitScalacheck.value % Test
       ),
