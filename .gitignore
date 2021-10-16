@@ -32,3 +32,6 @@ TAGS
 .metals
 .bloop
 .bsp
+
+# IntelliJ
+/.idea
